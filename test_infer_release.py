@@ -21,6 +21,16 @@ class InferenceEntrypointTests(unittest.TestCase):
             self.assertEqual(args[args.index('--stride') + 1], '64')
             self.assertEqual(args[args.index('--blend') + 1], 'hann')
 
+    def test_stride_option_is_passed_on(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d); weights = p / 'weights.safetensors'; weights.write_bytes(b'weights')
+            source = p / 'planes16.npy'; source.touch()
+            with patch.object(infer_release.subprocess, 'run') as run:
+                infer_release.main(['--input', str(source), '--output', str(p / 'ink.npy'), '--stride', '48',
+                                    '--checkpoint', str(weights), '--checkpoint-sha256', hashlib.sha256(b'weights').hexdigest()])
+            args = run.call_args.args[0]
+            self.assertEqual(args[args.index('--stride') + 1], '48')
+
     def test_bad_weights_never_run_inference(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d); weights = p / 'weights.safetensors'; weights.write_bytes(b'wrong weights')

@@ -1,9 +1,12 @@
 """Offline tiled inference on a uint8 [16,H,W] array in verified model depth order.
 
 Default: 128 px windows on a 96 px grid, central 96 px written without overlap (Studio's published tiling).
---stride 64 --blend hann: windows every 64 px, each central 96 px weighted by a pixel-centred 2-D Hann window and the
-overlaps averaged by weight (the tiling used for the PHerc0211 submission images; smooth, no tile seams).
-Pixels with no CT data (all 16 input planes 0, i.e. outside the rendered surface) are written as 0.
+--stride 48 --blend hann: windows every 48 px, each central 96 px weighted by a pixel-centred 2-D Hann window and the
+overlaps averaged by weight. At stride 48 every pixel lies in two windows per axis and the weights sum to one, so no
+tile pattern is left. Stride 64 (the tiling of the PHerc0211 submission images) hands over between windows within a
+32 px band and leaves faint squares in weak-ink areas.
+Pixels with no CT data (all 16 input planes 0, i.e. outside the rendered surface) are written as 0, and windows whose
+central 96 px has no CT data are not run at all (their pixels are 0 anyway; --keep-empty runs them).
 """
 import argparse
 from contextlib import nullcontext
@@ -37,7 +40,7 @@ def hann96():
 
 
 @torch.inference_mode()
-def predict(model, volume, output, device="cuda", batch_size=1, amp="bf16", stride=96, blend="none"):
+def predict(model, volume, output, device="cuda", batch_size=1, amp="bf16", stride=96, blend="none", skip_empty=True):
     if volume.ndim != 3 or volume.shape[0] != 16 or volume.dtype != np.uint8:
         raise ValueError("Expected uint8 [16,H,W], in the verified model depth order")
     h, w = volume.shape[-2:]
@@ -46,12 +49,14 @@ def predict(model, volume, output, device="cuda", batch_size=1, amp="bf16", stri
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     result = np.lib.format.open_memmap(output, mode="w+", dtype=np.float32, shape=(h, w))
+    empty = (np.asarray(volume) == 0).all(0)   # no CT data: outside the rendered surface
     if blend == "hann":
         weight = np.zeros((h, w), np.float32); kernel = hann96()
         result[:] = 0
     starts_y = sorted(set(list(range(0, h, stride)) + ([max(h - 96, 0)] if blend == "hann" else [])))
     starts_x = sorted(set(list(range(0, w, stride)) + ([max(w - 96, 0)] if blend == "hann" else [])))
-    coords = ((y, x) for y in starts_y for x in starts_x)
+    # A window only writes its central 96 px; if none of them has CT data, its output would be masked to 0 below anyway.
+    coords = ((y, x) for y in starts_y for x in starts_x if not (skip_empty and empty[y:y + 96, x:x + 96].all()))
     from itertools import islice
     while batch := list(islice(coords, batch_size)):
         raw = np.stack([crop(volume, y - 16, x - 16) for y, x in batch])
@@ -70,7 +75,7 @@ def predict(model, volume, output, device="cuda", batch_size=1, amp="bf16", stri
                 result[y:y + hh, x:x + ww] = p[:hh, :ww]
     if blend == "hann":
         result[:] = np.where(weight > 0, result / np.maximum(weight, 1e-12), 0).astype(np.float32)
-    result[(np.asarray(volume) == 0).all(0)] = 0   # no CT data: outside the rendered surface
+    result[empty] = 0
     result.flush()
     return result
 
@@ -85,8 +90,9 @@ def main():
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--amp", default="bf16", choices=["bf16", "fp32"])
-    parser.add_argument("--stride", type=int, default=96, help="Window step in px; 96 = no overlap (default), 64 = the submission tiling")
+    parser.add_argument("--stride", type=int, default=96, help="Window step in px; 96 = no overlap (default); with --blend hann, 48 = no tile pattern, 64 = the submission tiling")
     parser.add_argument("--blend", default="none", choices=["none", "hann"], help="hann: Hann-weighted average of overlapping windows")
+    parser.add_argument("--keep-empty", action="store_true", help="Also run windows with no CT data (slower)")
     args = parser.parse_args()
     if Path(args.input).resolve() == Path(args.output).resolve():
         parser.error("Input and output must be different files")
@@ -104,7 +110,8 @@ def main():
     model = load_model(checkpoint, args.device)
     if args.blend == "none" and args.stride != 96:
         parser.error("--stride other than 96 needs --blend hann")
-    predict(model, volume, args.output, args.device, args.batch_size, args.amp, args.stride, args.blend)
+    predict(model, volume, args.output, args.device, args.batch_size, args.amp, args.stride, args.blend,
+            skip_empty=not args.keep_empty)
 
 
 if __name__ == "__main__":

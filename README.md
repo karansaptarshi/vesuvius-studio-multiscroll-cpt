@@ -16,7 +16,10 @@ bash infer.sh --input planes16.npy --output ink.npy
 `planes16.npy` must be the uint8 CT stack `[16,H,W]` in model depth order (for the supplied surface,
 render planes 00–30 with Volume Cartographer and stack 23 down to 8). This entry point installs the pinned
 inference dependencies in `.venv-inference`, downloads the soft-loss release, verifies its full SHA-256,
-and calls `studio-multiscroll-cpt-20261023/hf/inference.py` with stride 64, Hann blending and batch size 32.
+and calls `studio-multiscroll-cpt-20261023/hf/inference.py` with stride 64, Hann blending and batch size 32
+(the submission tiling). For new maps, `--stride 48` is recommended: at stride 64 neighbouring windows hand over
+inside a 32 px band and leave faint squares in weak-ink areas; at 48 every pixel is in two windows per axis and the
+Hann weights sum to one. It takes about 1.7x as long.
 It stops on download, checksum, dependency or runtime errors. Use `--device cpu --batch-size 1 --amp fp32`
 for a slower CPU run. The documented path produces standard PyTorch inference; it is not bit-identical
 to the optimized GH200 output supplied with the submission.
